@@ -17,9 +17,10 @@
         7. Log      - append a timestamped record to remediation-log/.
 
     FIXES AVAILABLE (-Fix):
-        GlobalAdmin   - remove Global Administrator from accounts not on the approved list.
-        LicenseWaste  - remove paid licenses from DISABLED accounts (reclaim cost).
-        All           - run every fix (default).
+        GlobalAdmin     - remove Global Administrator from accounts not on the approved list.
+        LicenseWaste    - remove paid licenses from DISABLED accounts (reclaim cost).
+        ExternalSharing - dial org-wide SharePoint/OneDrive sharing off anonymous "Anyone" links.
+        All             - run every fix (default).
 
     SAFETY BY DESIGN:
       - Least privilege, per run: only requests the write scope(s) the chosen fix needs.
@@ -41,7 +42,7 @@
 #>
 
 param(
-    [ValidateSet('GlobalAdmin', 'LicenseWaste', 'All')]
+    [ValidateSet('GlobalAdmin', 'LicenseWaste', 'ExternalSharing', 'All')]
     [string]$Fix = 'All',
     [switch]$PreviewOnly
 )
@@ -240,6 +241,61 @@ function Repair-LicenseWaste {
 }
 
 # ===========================================================================
+# FIX: External sharing posture (ORG-WIDE setting, not per-user)
+# Moves off anonymous "Anyone" sharing while still allowing authenticated guests.
+# ===========================================================================
+function Get-SharingPosture { (Get-MgAdminSharepointSetting).SharingCapability }
+
+function Repair-ExternalSharing {
+    param([string]$Operator, [string]$TargetSharing = 'externalUserSharingOnly')
+    Write-Log "=== FIX: External sharing posture (ORG-WIDE) ===" 'INFO'
+
+    $current = Get-SharingPosture
+    Write-Log ("Current org sharing capability: {0}" -f $current)
+
+    # The only setting we treat as a problem is anonymous "Anyone" sharing.
+    if ($current -ne 'externalUserAndGuestSharing') {
+        Write-Log ("Sharing is '{0}', not anonymous 'Anyone' - already acceptable. Nothing to do." -f $current) 'OK'
+        return
+    }
+
+    Write-Host ""
+    Write-Host "PROPOSED REMEDIATION - External sharing (ORG-WIDE)" -ForegroundColor Cyan
+    Write-Host ("Current:  '{0}'  -> anonymous 'Anyone' links allowed (anyone with a link can open shared files)." -f $current) -ForegroundColor Yellow
+    Write-Host ("Proposed: '{0}'  -> external sharing still allowed, but guests must SIGN IN (no anonymous links)." -f $TargetSharing)
+    Write-Host "SCOPE: this is an ORGANIZATION-WIDE change - it affects sharing for EVERY user and site at once." -ForegroundColor DarkYellow
+    Write-Host "NOTE: existing anonymous links will stop working. For a real client, confirm nothing critical depends on them first." -ForegroundColor DarkYellow
+    Write-Host ""
+
+    Write-Host "Preview (no change is made):"
+    Update-MgAdminSharepointSetting -BodyParameter @{ sharingCapability = $TargetSharing } -WhatIf
+
+    if ($PreviewOnly) {
+        Write-Log ("PREVIEW ONLY: would change org sharing '{0}' -> '{1}'. No change made." -f $current, $TargetSharing) 'INFO'
+        return
+    }
+
+    $answer = Read-Host ("Change ORG-WIDE sharing from '{0}' to '{1}'? This affects EVERYONE. Type YES to confirm (anything else skips)" -f $current, $TargetSharing)
+    if ($answer -ne 'YES') { Write-Log ("SKIPPED org-wide sharing change by operator (answer: '{0}')." -f $answer) 'WARN'; return }
+
+    try {
+        Write-Log ("CHANGING org sharing '{0}' -> '{1}' ..." -f $current, $TargetSharing) 'ACTION'
+        Update-MgAdminSharepointSetting -BodyParameter @{ sharingCapability = $TargetSharing } | Out-Null
+        Write-Log ("CHANGED org sharing to '{0}' by {1}." -f $TargetSharing, $Operator) 'OK'
+    }
+    catch { Write-Log ("FAILED to change org sharing: {0}" -f $_.Exception.Message) 'ERROR' }
+
+    # Verify (wait+retry for eventual consistency).
+    $after = Get-SharingPosture
+    for ($i = 1; $i -le 5 -and $after -ne $TargetSharing; $i++) {
+        Write-Log ("Change not fully synced yet (saw '{0}', expecting '{1}'); waiting 4s... [try {2}/5]" -f $after, $TargetSharing, $i) 'INFO'
+        Start-Sleep -Seconds 4
+        $after = Get-SharingPosture
+    }
+    Write-Log ("Verification - org sharing capability now: '{0}'" -f $after) 'OK'
+}
+
+# ===========================================================================
 # MAIN
 # ===========================================================================
 Write-Host "M365 / Entra Remediation - approval-gated, least-privilege, fully logged." -ForegroundColor Cyan
@@ -247,15 +303,18 @@ Write-Host ("Fix selected: {0}" -f $Fix) -ForegroundColor Cyan
 if ($PreviewOnly) { Write-Host "MODE: PREVIEW ONLY - nothing will be changed." -ForegroundColor Green }
 Write-Host ""
 
-# Build the minimal scope set for the chosen fix(es).
-$scopes = @('Directory.Read.All')
-if ($Fix -in @('GlobalAdmin','All'))  { $scopes += 'RoleManagement.ReadWrite.Directory' }
-if ($Fix -in @('LicenseWaste','All')) { $scopes += 'LicenseAssignment.ReadWrite.All' }
+# Build the minimal scope set for the chosen fix(es) - least privilege per run.
+$scopes = @()
+if ($Fix -in @('GlobalAdmin','All'))     { $scopes += 'RoleManagement.ReadWrite.Directory','Directory.Read.All' }
+if ($Fix -in @('LicenseWaste','All'))    { $scopes += 'LicenseAssignment.ReadWrite.All','Directory.Read.All' }
+if ($Fix -in @('ExternalSharing','All')) { $scopes += 'SharePointTenantSettings.ReadWrite.All' }
+$scopes = @($scopes | Select-Object -Unique)
 
 $operator = Connect-Remediation -RequiredScopes $scopes
 
-if ($Fix -in @('GlobalAdmin','All'))  { Repair-GlobalAdminSprawl -Operator $operator }
-if ($Fix -in @('LicenseWaste','All')) { Repair-LicenseWaste      -Operator $operator }
+if ($Fix -in @('GlobalAdmin','All'))     { Repair-GlobalAdminSprawl -Operator $operator }
+if ($Fix -in @('LicenseWaste','All'))    { Repair-LicenseWaste      -Operator $operator }
+if ($Fix -in @('ExternalSharing','All')) { Repair-ExternalSharing   -Operator $operator }
 
 Write-Host ""
 Write-Log ("Done. Full log saved to: {0}" -f $script:LogPath) 'OK'
