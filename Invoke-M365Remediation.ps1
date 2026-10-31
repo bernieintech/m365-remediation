@@ -50,10 +50,7 @@ param(
 # ---------------------------------------------------------------------------
 # CONFIG - accounts allowed to KEEP Global Administrator (primary + break-glass).
 # ---------------------------------------------------------------------------
-$ApprovedGlobalAdmins = @(
-    'adminbernie10@magicbventureslab.onmicrosoft.com',
-    'sglass@magicbventureslab.onmicrosoft.com'
-)
+. "$PSScriptRoot/app-config.ps1"   # loads ClientId, TenantId, ApprovedGlobalAdmins (git-ignored)
 
 # ---------------------------------------------------------------------------
 # Logging - every run and every action is written to a timestamped file.
@@ -96,7 +93,7 @@ function Connect-Remediation {
     $ctx = Get-MgContext
     $haveAll = $ctx -and $ctx.Account -and -not (@($writeScopes | Where-Object { $ctx.Scopes -notcontains $_ }))
     if (-not $haveAll) {
-        Connect-MgGraph -UseDeviceCode -Scopes $RequiredScopes -NoWelcome
+        Connect-MgGraph -ClientId $ClientId -TenantId $TenantId -UseDeviceCode -Scopes $RequiredScopes -NoWelcome
         $ctx = Get-MgContext
     }
     if (-not $ctx -or -not $ctx.Account) {

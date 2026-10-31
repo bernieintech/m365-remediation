@@ -6,3 +6,4 @@ remediation-log/
 # OS noise
 .DS_Store
 Thumbs.db
+app-config.ps1
