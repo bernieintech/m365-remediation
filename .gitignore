@@ -1,0 +1,9 @@
+# Remediation run logs — contain tenant specifics, never commit
+remediation-log/
+*.log
+*.local
+*.tmp
+# OS noise
+.DS_Store
+Thumbs.db
+app-config.ps1
